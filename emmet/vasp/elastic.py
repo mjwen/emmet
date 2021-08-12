@@ -36,7 +36,7 @@ from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 from atomate.vasp.workflows.base.elastic import get_default_strain_states
 
 from maggma.builders import Builder
-from emmet.materials.mp_website import MPBUILDER_SETTINGS
+from emmet.materials.website import MPBUILDER_SETTINGS
 
 from pydash.objects import get, set_
 
@@ -75,13 +75,12 @@ class ElasticAnalysisBuilder(Builder):
         # By default, incremental
         if incremental is None:
             self.elasticity.connect()
-            if self.elasticity.query().count() > 0:
+            if self.elasticity.count() > 0:
                 self.incremental = True
             else:
                 self.incremental = False
         else:
             self.incremental = incremental
-        self.incremental = incremental
         self.start_date = datetime.utcnow()
 
         super().__init__(sources=[tasks],
@@ -139,11 +138,11 @@ class ElasticAnalysisBuilder(Builder):
         self.logger.info("Aggregation complete")
         self.total = len(formulas)
 
-        for n, doc in enumerate(cmd_cursor):
+        for n, (id_doc, docs) in enumerate(cmd_cursor):
             # TODO: refactor for task sets without structure opt
             logger.debug("Getting formula {}, {} of {}".format(
-                doc['_id']['formula_pretty'], n, len(formulas)))
-            yield doc['docs']
+                id_doc['formula_pretty'], n, len(formulas)))
+            yield docs
 
     def process_item(self, item):
         """
@@ -171,6 +170,7 @@ class ElasticAnalysisBuilder(Builder):
                 warnings.simplefilter('ignore')
                 elastic_doc = get_elastic_analysis(opt_task, defo_tasks)
                 if elastic_doc:
+                    elastic_doc['last_updated'] = datetime.utcnow()
                     elastic_docs.append(elastic_doc)
         return elastic_docs
 
@@ -183,7 +183,7 @@ class ElasticAnalysisBuilder(Builder):
         """
         items = filter(bool, items)
         items = chain.from_iterable(items)
-        items = [jsanitize(doc, strict=True) for doc in items]
+        items = [jsanitize(doc, strict=True, allow_bson=True) for doc in items]
 
         self.logger.info("Updating {} elastic documents".format(len(items)))
 

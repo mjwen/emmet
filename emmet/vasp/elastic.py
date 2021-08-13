@@ -170,6 +170,7 @@ class ElasticAnalysisBuilder(Builder):
                 warnings.simplefilter('ignore')
                 elastic_doc = get_elastic_analysis(opt_task, defo_tasks)
                 if elastic_doc:
+                    # TODO (mjwen) should we just put the timestamp of the task docs?
                     elastic_doc['last_updated'] = datetime.utcnow()
                     elastic_docs.append(elastic_doc)
         return elastic_docs
@@ -220,7 +221,7 @@ class ElasticAggregateBuilder(Builder):
         # By default, incremental
         if incremental is None:
             self.elasticity.connect()
-            if self.elasticity.query().count() > 0:
+            if self.elasticity.count() > 0:
                 self.incremental = True
             else:
                 self.incremental = False
@@ -248,35 +249,35 @@ class ElasticAggregateBuilder(Builder):
             self.elasticity_aggregated.ensure_index(self.elasticity.last_updated_field)
             incr_filter = self.query
             incr_filter.update(self.elasticity.lu_filter(self.elasticity_aggregated))
-            formulas = self.elasticity.distinct("pretty_formula", incr_filter)
-            q.update({"pretty_formula": {"$in": formulas}})
+            formulas = self.elasticity.distinct("formula_pretty", incr_filter)
+            q.update({"formula_pretty": {"$in": formulas}})
             if len(formulas) > 500:
                 self.logger.debug("More than 500 new formulas, incremental "
                                   "mode may be inefficient")
-            material_filter = {"pretty_formula": {"$in": formulas}}
+            material_filter = {"formula_pretty": {"$in": formulas}}
         else:
             material_filter = {}
-            if q.get("pretty_formula"):
-                material_filter.update({"pretty_formula": q.get("pretty_formula")})
-            formulas = self.elasticity.distinct("pretty_formula")
+            if q.get("formula_pretty"):
+                material_filter.update({"formula_pretty": q.get("formula_pretty")})
+            formulas = self.elasticity.distinct("formula_pretty")
 
         self.total = len(formulas)
         logger.info("Generating formula dict")
         material_dict = generate_formula_dict(self.materials, material_filter)
         logger.info("Starting formula aggregation")
-        cursor = self.elasticity.groupby("pretty_formula", criteria=q)
-        for result in cursor:
-            formula = result['_id']['pretty_formula']
+        cursor = self.elasticity.groupby("formula_pretty", criteria=q)
+        for id_doc, docs in cursor:
+            formula = id_doc['formula_pretty']
             structures_by_mp_id = material_dict.get(formula, None)
             if not structures_by_mp_id:
                 logger.info("No materials for formula {}".format(formula))
             else:
-                yield result['docs'], structures_by_mp_id
+                yield docs, structures_by_mp_id
 
     def process_item(self, item):
         docs, material_dict = item
         grouped = group_by_material_id(material_dict, docs, 'input_structure')
-        formula = docs[0]['pretty_formula']
+        formula = docs[0]['formula_pretty']
         if not grouped:
             formula = Structure.from_dict(list(
                 material_dict.values())[0]).composition.reduced_formula
@@ -330,7 +331,7 @@ class ElasticAggregateBuilder(Builder):
                                'elasticity': final_doc,
                                'spacegroup': init.get_space_group_info()[0],
                                'magnetic_type': final_doc['magnetic_type'],
-                               'pretty_formula': formula,
+                               'formula_pretty': formula,
                                'chemsys': chemsys,
                                'elements': elements,
                                'last_updated': self.elasticity.last_updated_field,
@@ -348,7 +349,7 @@ class ElasticAggregateBuilder(Builder):
         return all_docs
 
     def update_targets(self, items):
-        items = chain.from_iterable(items)
+        items = list(chain.from_iterable(items))
         self.elasticity_aggregated.update(items)
 
 
@@ -424,7 +425,7 @@ def get_elastic_analysis(opt_task, defo_tasks):
             "completed_at": completed_at,
             "optimization_input": vasp_input,
             "order": order,
-            "pretty_formula": opt_struct.composition.reduced_formula})
+            "formula_pretty": opt_struct.composition.reduced_formula})
         # Add magnetic type
         mag = CollinearMagneticStructureAnalyzer(opt_struct).ordering.value
         elastic_doc['magnetic_type'] = mag_types[mag]
@@ -860,14 +861,13 @@ def generate_formula_dict(materials_store, query=None):
         Nested dictionary keyed by formula-mp_id with structure values.
 
     """
-    props = ["pretty_formula", "structure", "task_id", "magnetic_type"]
-    results = list(materials_store.groupby("pretty_formula", properties=props,
-                                           criteria=query))
+    props = ["formula_pretty", "structure", "task_id", "magnetic_type"]
+    results = materials_store.groupby("formula_pretty", properties=props, criteria=query)
     formula_dict = {}
-    for result in tqdm.tqdm(results):
-        formula = result['_id']['pretty_formula']
-        task_ids = [d['task_id'] for d in result['docs']]
-        structures = [d['structure'] for d in result['docs']]
+    for id_doc, docs in tqdm.tqdm(results):
+        formula = id_doc['formula_pretty']
+        task_ids = [d['task_id'] for d in docs]
+        structures = [d['structure'] for d in docs]
         formula_dict[formula] = dict(zip(task_ids, structures))
     return formula_dict
 
